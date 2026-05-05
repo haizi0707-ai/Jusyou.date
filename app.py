@@ -24,6 +24,21 @@ DEFAULT_LOGIC = BASE_DIR / "重賞別_プロンプト用ロジック辞書.csv"
 DEFAULT_KESHI = BASE_DIR / "重賞別_消し条件候補.csv"
 DEFAULT_SUMMARY = BASE_DIR / "重賞別_抽出サマリー.csv"
 
+
+def find_csv_by_keyword(keyword: str) -> Path | None:
+    """GitHub/iPhoneアップロード時のファイル名ゆれ対策。"""
+    if keyword == "logic":
+        patterns = ["*プロンプト*ロジック*.csv", "*ロジック辞書*.csv", "*prompt*logic*.csv"]
+    elif keyword == "keshi":
+        patterns = ["*消し条件*.csv", "*keshi*.csv"]
+    else:
+        patterns = ["*抽出サマリー*.csv", "*summary*.csv"]
+    for pat in patterns:
+        hits = sorted(BASE_DIR.glob(pat))
+        if hits:
+            return hits[0]
+    return None
+
 RANK_WEIGHT = {
     "S": 3.0,
     "A": 2.0,
@@ -59,7 +74,10 @@ def read_csv_auto(file_or_path) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_default_logic() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    return read_csv_auto(DEFAULT_LOGIC), read_csv_auto(DEFAULT_KESHI), read_csv_auto(DEFAULT_SUMMARY)
+    logic_path = DEFAULT_LOGIC if DEFAULT_LOGIC.exists() else find_csv_by_keyword("logic")
+    keshi_path = DEFAULT_KESHI if DEFAULT_KESHI.exists() else find_csv_by_keyword("keshi")
+    summary_path = DEFAULT_SUMMARY if DEFAULT_SUMMARY.exists() else find_csv_by_keyword("summary")
+    return read_csv_auto(logic_path), read_csv_auto(keshi_path), read_csv_auto(summary_path)
 
 
 def normalize_bool(x) -> bool:
@@ -244,6 +262,12 @@ with st.sidebar:
 required_cols = {"重賞名", "条件ランク", "条件名"}
 if logic_df.empty or not required_cols.issubset(set(logic_df.columns)):
     st.error("ロジック辞書CSVが読み込めません。『重賞名・条件ランク・条件名』列が必要です。")
+    st.write("現在アプリが認識しているCSVファイル一覧：")
+    st.write([p.name for p in BASE_DIR.glob("*.csv")])
+    if not logic_df.empty:
+        st.write("読み込めたCSVの列名：")
+        st.write(list(logic_df.columns))
+    st.info("GitHub上に『重賞別_プロンプト用ロジック辞書.csv』があるか確認してください。ファイル名が少し違う場合は、この画面の一覧を見て原因を確認できます。")
     st.stop()
 
 races = sorted(logic_df["重賞名"].dropna().astype(str).unique().tolist())
