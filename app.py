@@ -379,6 +379,88 @@ def csv_download(df: pd.DataFrame, filename: str, label: str):
 
 
 
+def build_third_app_star_export(scored: pd.DataFrame, race_name: str, year: str, status: str = "", star_name: str | None = None) -> pd.DataFrame:
+    """
+    第3アプリ用：重賞⭐️フィルター側CSVを作成する。
+    既存判定ロジックは変更せず、CSV出力用の列だけ整える。
+
+    第3アプリは基本キー（日付＋場所＋R＋レース名＋馬番＋馬名）で結合し、
+    日付/場所/Rが空の場合は fallback（レース名＋馬番＋馬名）で結合する。
+    この⭐️アプリ側では開催場/Rを持たないため、レース名＋馬番＋馬名での結合を想定する。
+    """
+    if scored is None or scored.empty:
+        return pd.DataFrame()
+
+    out = scored.copy()
+
+    if "馬番" not in out.columns:
+        out["馬番"] = ""
+    if "馬名" not in out.columns:
+        out["馬名"] = ""
+
+    def judge_label(row) -> str:
+        if bool(row.get("消し該当", False)):
+            return "危険⭐"
+        try:
+            rank_no = int(row.get("暫定順位", 0))
+        except Exception:
+            rank_no = 0
+        name = str(row.get("馬名", ""))
+        if rank_no == 1:
+            if str(status) == "⭐️" or str(status) == "⭐":
+                return "単独⭐"
+            if "準" in str(status):
+                return "準⭐"
+            # statusが残っていない場合の保険
+            if star_name and name == str(star_name):
+                return "単独⭐"
+            return "準⭐"
+        return "候補外"
+
+    out["重賞判定"] = out.apply(judge_label, axis=1)
+    out["S条件該当数"] = pd.to_numeric(out.get("S該当数", 0), errors="coerce").fillna(0).astype(int)
+    out["A条件該当数"] = pd.to_numeric(out.get("A該当数", 0), errors="coerce").fillna(0).astype(int)
+    out["B条件該当数"] = pd.to_numeric(out.get("B該当数", 0), errors="coerce").fillna(0).astype(int)
+    out["補助条件該当数"] = pd.to_numeric(out.get("補助該当数", 0), errors="coerce").fillna(0).astype(int)
+    out["消し条件数"] = out.get("消し該当", False).apply(lambda x: 1 if bool(x) else 0)
+
+    def make_comment(row) -> str:
+        parts = [
+            f'S{int(row.get("S条件該当数", 0))}',
+            f'A{int(row.get("A条件該当数", 0))}',
+            f'B{int(row.get("B条件該当数", 0))}',
+            f'補助{int(row.get("補助条件該当数", 0))}',
+            f'スコア{row.get("条件スコア", "")}',
+        ]
+        if bool(row.get("消し該当", False)):
+            k = str(row.get("消し条件名", "")).strip()
+            parts.append("消し該当" + (f'・{k}' if k else ""))
+        return " / ".join([str(x) for x in parts if str(x).strip()])
+
+    out["重賞コメント"] = out.apply(make_comment, axis=1)
+
+    export = pd.DataFrame({
+        "日付": "",
+        "場所": "",
+        "R": "",
+        "レース名": str(race_name),
+        "馬番": pd.to_numeric(out["馬番"], errors="coerce").fillna(0).astype(int),
+        "馬名": out["馬名"].astype(str),
+        "重賞判定": out["重賞判定"],
+        "S条件該当数": out["S条件該当数"],
+        "A条件該当数": out["A条件該当数"],
+        "B条件該当数": out["B条件該当数"],
+        "補助条件該当数": out["補助条件該当数"],
+        "消し条件数": out["消し条件数"],
+        "条件スコア": out.get("条件スコア", ""),
+        "重賞コメント": out["重賞コメント"],
+        "該当条件一覧": out.get("該当条件一覧", ""),
+    })
+    export = export.sort_values(["馬番", "馬名"]).reset_index(drop=True)
+    return export
+
+
+
 def rebuild_compact_for_race(updated_full: pd.DataFrame, old_logic: pd.DataFrame, race_name: str) -> pd.DataFrame:
     """再現性フィルター抽出.csvから、選択重賞だけプロンプト用辞書を作り直す。"""
     if updated_full is None or updated_full.empty:
@@ -633,6 +715,18 @@ with tab3:
             out_cols = [c for c in ["暫定順位", "馬番", "馬名", "S該当数", "A該当数", "B該当数", "補助該当数", "条件スコア", "消し該当", "消し条件名", "補足", "該当条件一覧"] if c in scored.columns]
             st.dataframe(scored[out_cols], use_container_width=True, hide_index=True)
             csv_download(scored, f"{selected_race}_{year}_星判定結果.csv", "判定結果CSVをダウンロード")
+
+            st.markdown("#### 第3アプリ用 重賞⭐️CSV出力")
+            st.caption("直線ロジックCSVと複合するためのCSVです。⭐️アプリ側は開催場/Rを持たないため、第3アプリでは主に『レース名＋馬番＋馬名』で結合します。")
+            third_star_df = build_third_app_star_export(scored, selected_race, year, status, star_name)
+            st.dataframe(third_star_df, use_container_width=True, hide_index=True)
+            third_star_csv = third_star_df.to_csv(index=False, encoding="utf-8-sig")
+            st.download_button(
+                "第3アプリ用 重賞⭐️CSVをダウンロード",
+                data=third_star_csv.encode("utf-8-sig"),
+                file_name="third_app_jusyo_star.csv",
+                mime="text/csv",
+            )
 
 with tab4:
     st.subheader("結果更新")
