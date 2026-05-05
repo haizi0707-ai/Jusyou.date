@@ -65,7 +65,9 @@ def read_csv_auto(file_or_path) -> pd.DataFrame:
         raw = file_or_path.getvalue()
     for enc in ("utf-8-sig", "cp932", "utf-8"):
         try:
-            return pd.read_csv(io.BytesIO(raw), encoding=enc)
+            df = pd.read_csv(io.BytesIO(raw), encoding=enc)
+            df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+            return df
         except Exception:
             pass
     # 最後の保険
@@ -74,10 +76,33 @@ def read_csv_auto(file_or_path) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_default_logic() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    logic_path = DEFAULT_LOGIC if DEFAULT_LOGIC.exists() else find_csv_by_keyword("logic")
+    """
+    GitHub/iPhoneアップロード時にファイル名が少し変わっても、
+    CSVの中身（列名）を見てロジック辞書を自動判定する。
+    """
+    required = {"重賞名", "条件ランク", "条件名"}
+
+    # 1) まず全CSVを読んで、中身でロジック辞書を探す
+    logic_df = pd.DataFrame()
+    csv_paths = sorted(BASE_DIR.glob("*.csv"))
+    for path in csv_paths:
+        df = read_csv_auto(path)
+        if not df.empty and required.issubset(set(df.columns)):
+            logic_df = df
+            break
+
+    # 2) 見つからない場合だけ従来のファイル名探索
+    if logic_df.empty:
+        logic_path = DEFAULT_LOGIC if DEFAULT_LOGIC.exists() else find_csv_by_keyword("logic")
+        logic_df = read_csv_auto(logic_path)
+
+    # 消し条件・サマリーはファイル名で読む。失敗してもアプリは動く
     keshi_path = DEFAULT_KESHI if DEFAULT_KESHI.exists() else find_csv_by_keyword("keshi")
     summary_path = DEFAULT_SUMMARY if DEFAULT_SUMMARY.exists() else find_csv_by_keyword("summary")
-    return read_csv_auto(logic_path), read_csv_auto(keshi_path), read_csv_auto(summary_path)
+    keshi_df = read_csv_auto(keshi_path)
+    summary_df = read_csv_auto(summary_path)
+
+    return logic_df, keshi_df, summary_df
 
 
 def normalize_bool(x) -> bool:
