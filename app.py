@@ -23,6 +23,7 @@ BASE_DIR = Path(__file__).parent
 DEFAULT_LOGIC = BASE_DIR / "重賞別_プロンプト用ロジック辞書.csv"
 DEFAULT_KESHI = BASE_DIR / "重賞別_消し条件候補.csv"
 DEFAULT_SUMMARY = BASE_DIR / "重賞別_抽出サマリー.csv"
+DEFAULT_FULL = BASE_DIR / "重賞別_再現性フィルター抽出.csv"
 
 
 def find_csv_by_keyword(keyword: str) -> Path | None:
@@ -31,8 +32,10 @@ def find_csv_by_keyword(keyword: str) -> Path | None:
         patterns = ["*プロンプト*ロジック*.csv", "*ロジック辞書*.csv", "*prompt*logic*.csv"]
     elif keyword == "keshi":
         patterns = ["*消し条件*.csv", "*keshi*.csv"]
-    else:
+    elif keyword == "summary":
         patterns = ["*抽出サマリー*.csv", "*summary*.csv"]
+    else:
+        patterns = ["*再現性フィルター*.csv", "*filter*.csv"]
     for pat in patterns:
         hits = sorted(BASE_DIR.glob(pat))
         if hits:
@@ -75,7 +78,7 @@ def read_csv_auto(file_or_path) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_default_logic() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_default_logic() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     GitHub/iPhoneアップロード時にファイル名が少し変わっても、
     CSVの中身（列名）を見てロジック辞書を自動判定する。
@@ -101,8 +104,10 @@ def load_default_logic() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     summary_path = DEFAULT_SUMMARY if DEFAULT_SUMMARY.exists() else find_csv_by_keyword("summary")
     keshi_df = read_csv_auto(keshi_path)
     summary_df = read_csv_auto(summary_path)
+    full_path = DEFAULT_FULL if DEFAULT_FULL.exists() else find_csv_by_keyword("full")
+    full_df = read_csv_auto(full_path)
 
-    return logic_df, keshi_df, summary_df
+    return logic_df, keshi_df, summary_df, full_df
 
 
 def normalize_bool(x) -> bool:
@@ -373,20 +378,178 @@ def csv_download(df: pd.DataFrame, filename: str, label: str):
     st.download_button(label, data=data, file_name=filename, mime="text/csv")
 
 
+
+def rebuild_compact_for_race(updated_full: pd.DataFrame, old_logic: pd.DataFrame, race_name: str) -> pd.DataFrame:
+    """再現性フィルター抽出.csvから、選択重賞だけプロンプト用辞書を作り直す。"""
+    if updated_full is None or updated_full.empty:
+        return old_logic
+    sub = updated_full[updated_full["重賞名"].astype(str) == str(race_name)].copy()
+    if sub.empty:
+        return old_logic
+
+    # 対象年数に応じてランクを再判定（累積追記型）
+    def rerank(r):
+        n = int(r.get("対象年数", 10) or 10)
+        cover = int(r.get("年カバー数", 0) or 0)
+        hits = int(r.get("馬券内該当数", 0) or 0)
+        if cover == n and hits >= 15:
+            return "S"
+        if cover == n and hits >= 10:
+            return "A"
+        if cover >= max(n - 1, 1) and hits >= 10:
+            return "B"
+        if cover >= max(n - 2, 1) and hits >= 8:
+            return "補助"
+        return "不採用"
+
+    sub["条件ランク"] = sub.apply(rerank, axis=1)
+    sub = sub[sub["条件ランク"].isin(["S", "A", "B", "補助"])].copy()
+    if sub.empty:
+        # 該当条件が消えた場合は、その重賞を空にする
+        return old_logic[old_logic["重賞名"].astype(str) != str(race_name)].copy()
+
+    # 旧アプリと同じようにプロンプト用に絞る
+    gg = sub[sub["条件ランク"].isin(["S", "A", "B"])].copy()
+    pref = gg[(gg.get("条件タイプ", "") != "基礎条件") & (pd.to_numeric(gg.get("全出走該当率", 0), errors="coerce") <= 0.70)]
+    if len(pref) < 5:
+        pref = gg
+    if "項目" in pref.columns:
+        pref2 = pref[~pref["項目"].astype(str).str.contains("人気", na=False)]
+        if len(pref2) >= 5:
+            pref = pref2
+    rank_order = {"S": 0, "A": 1, "B": 2, "補助": 3}
+    pref["rank_sort"] = pref["条件ランク"].map(rank_order).fillna(9)
+    pref = pref.sort_values(["rank_sort", "リフト", "馬券内該当数"], ascending=[True, False, False]).head(12)
+
+    rows = []
+    for i, (_, r) in enumerate(pref.iterrows(), 1):
+        target = int(r.get("対象年数", 0) or 0)
+        cover = int(r.get("年カバー数", 0) or 0)
+        hits = int(r.get("馬券内該当数", 0) or 0)
+        lift = r.get("リフト", "")
+        try:
+            lift_txt = f"{float(lift):.3f}"
+        except Exception:
+            lift_txt = str(lift)
+        rows.append({
+            "重賞名": race_name,
+            "表示順": i,
+            "条件ランク": r.get("条件ランク", ""),
+            "条件名": r.get("条件名", ""),
+            "条件タイプ": r.get("条件タイプ", ""),
+            "根拠": f"{target}年中{cover}年カバー / 馬券内{hits}頭 / リフト{lift_txt}",
+            "年カバー数": cover,
+            "馬券内該当数": hits,
+            "全出走該当率": r.get("全出走該当率", ""),
+            "リフト": r.get("リフト", ""),
+        })
+    new_sub = pd.DataFrame(rows)
+    other = old_logic[old_logic["重賞名"].astype(str) != str(race_name)].copy()
+    return pd.concat([other, new_sub], ignore_index=True)
+
+
+def update_logic_files_from_current(
+    logic_df: pd.DataFrame,
+    full_df: pd.DataFrame,
+    scored_df: pd.DataFrame,
+    result_df: pd.DataFrame,
+    race_name: str,
+    year: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    今年の該当CSV（全頭）＋結果CSV（1〜3着）を使い、既存条件の集計を追記更新する。
+    注意: これは既存条件の累積更新。完全なローリング10年再抽出には、元のTARGET全項目データが必要。
+    """
+    if full_df is None or full_df.empty or scored_df is None or scored_df.empty or result_df is None or result_df.empty:
+        return logic_df, full_df
+    if "条件名" not in full_df.columns or "重賞名" not in full_df.columns:
+        return logic_df, full_df
+    if "馬名" not in scored_df.columns or "馬名" not in result_df.columns:
+        return logic_df, full_df
+
+    updated_full = full_df.copy()
+    pred = scored_df.copy()
+    res = result_df.copy()
+    pred["照合馬名"] = pred["馬名"].apply(normalize_horse_name)
+    res["照合馬名"] = res["馬名"].apply(normalize_horse_name)
+    if "着順" in res.columns:
+        res["着順_num"] = pd.to_numeric(res["着順"], errors="coerce")
+        top_names = set(res[res["着順_num"].between(1, 3)]["照合馬名"].tolist())
+    else:
+        top_names = set(res["照合馬名"].head(3).tolist())
+    if not top_names:
+        return logic_df, full_df
+
+    top_mask_pred = pred["照合馬名"].isin(top_names)
+    all_total_add = int(len(pred))
+    top_total_add = int(top_mask_pred.sum())
+    if top_total_add == 0:
+        top_total_add = min(3, len(res))
+
+    race_mask = updated_full["重賞名"].astype(str) == str(race_name)
+    for idx, r in updated_full[race_mask].iterrows():
+        cond = str(r.get("条件名", ""))
+        if cond not in pred.columns:
+            continue
+        hits_all = pred[cond].apply(normalize_bool)
+        all_match_add = int(hits_all.sum())
+        top_match_add = int((hits_all & top_mask_pred).sum())
+        cover_add = 1 if top_match_add >= 1 else 0
+
+        # 集計列を追記
+        for col, add_val in {
+            "対象年数": 1,
+            "年カバー数": cover_add,
+            "馬券内該当数": top_match_add,
+            "馬券内総数": top_total_add,
+            "全出走該当数": all_match_add,
+            "全出走総数": all_total_add,
+        }.items():
+            if col in updated_full.columns:
+                old = pd.to_numeric(pd.Series([updated_full.at[idx, col]]), errors="coerce").iloc[0]
+                if pd.isna(old): old = 0
+                updated_full.at[idx, col] = old + add_val
+
+        # 率を再計算
+        target = float(updated_full.at[idx, "対象年数"]) if "対象年数" in updated_full.columns else 0
+        cover = float(updated_full.at[idx, "年カバー数"]) if "年カバー数" in updated_full.columns else 0
+        top_hits = float(updated_full.at[idx, "馬券内該当数"]) if "馬券内該当数" in updated_full.columns else 0
+        top_total = float(updated_full.at[idx, "馬券内総数"]) if "馬券内総数" in updated_full.columns else 0
+        all_hits = float(updated_full.at[idx, "全出走該当数"]) if "全出走該当数" in updated_full.columns else 0
+        all_total = float(updated_full.at[idx, "全出走総数"]) if "全出走総数" in updated_full.columns else 0
+        if "年カバー率" in updated_full.columns and target:
+            updated_full.at[idx, "年カバー率"] = round(cover / target, 3)
+        if "馬券内該当率" in updated_full.columns and top_total:
+            updated_full.at[idx, "馬券内該当率"] = round(top_hits / top_total, 3)
+        if "全出走該当率" in updated_full.columns and all_total:
+            updated_full.at[idx, "全出走該当率"] = round(all_hits / all_total, 3)
+        if "条件内馬券内率" in updated_full.columns and all_hits:
+            updated_full.at[idx, "条件内馬券内率"] = round(top_hits / all_hits, 3)
+        if "リフト" in updated_full.columns and all_total and all_hits and top_total:
+            base_rate = top_total / all_total
+            cond_rate = top_hits / all_hits
+            updated_full.at[idx, "リフト"] = round(cond_rate / base_rate, 3) if base_rate else 0
+
+    updated_logic = rebuild_compact_for_race(updated_full, logic_df, race_name)
+    return updated_logic, updated_full
+
 # ---------------- UI ----------------
 st.title(APP_TITLE)
 st.caption("重賞ごとの過去10年1〜3着馬フィルターを使い、ランキングではなく⭐️候補1頭を抽出するためのアプリです。")
 
-logic_df, keshi_df, summary_df = load_default_logic()
+logic_df, keshi_df, summary_df, full_extract_df = load_default_logic()
 
 with st.sidebar:
     st.header("データ読み込み")
     up_logic = st.file_uploader("ロジック辞書CSV（任意）", type=["csv"], key="logic")
     up_keshi = st.file_uploader("消し条件候補CSV（任意）", type=["csv"], key="keshi")
+    up_full = st.file_uploader("再現性フィルター抽出CSV（任意）", type=["csv"], key="full_extract")
     if up_logic is not None:
         logic_df = read_csv_auto(up_logic)
     if up_keshi is not None:
         keshi_df = read_csv_auto(up_keshi)
+    if up_full is not None:
+        full_extract_df = read_csv_auto(up_full)
 
     st.divider()
     st.header("判定設定")
@@ -530,6 +693,24 @@ with tab4:
                     st.success("アプリ内の一時履歴に反映しました。下のボタンからCSVをダウンロードしてください。")
 
                 csv_download(update_df, f"{selected_race}_{year}_今回結果更新.csv", "今回の結果更新CSVをダウンロード")
+
+                st.markdown("#### ロジック辞書・再現性フィルター抽出も更新する場合")
+                st.caption("③の全頭該当CSV＋④の1〜3着結果を使い、既存条件の集計を追記更新します。GitHubには下の2つの更新後CSVを同じファイル名で上書きしてください。")
+                st.markdown("更新対象：`重賞別_プロンプト用ロジック辞書.csv` / `重賞別_再現性フィルター抽出.csv`")
+                if st.button("この結果でロジック辞書＋再現性フィルターを再計算", type="secondary"):
+                    new_logic, new_full = update_logic_files_from_current(logic_df, full_extract_df, scored_for_update, res_df, selected_race, year)
+                    st.session_state["updated_logic_df"] = new_logic
+                    st.session_state["updated_full_extract_df"] = new_full
+                    st.success("更新後のロジック辞書CSVと再現性フィルター抽出CSVを作成しました。下から2つともダウンロードできます。")
+
+                updated_logic_df = st.session_state.get("updated_logic_df", pd.DataFrame())
+                updated_full_df = st.session_state.get("updated_full_extract_df", pd.DataFrame())
+                if updated_logic_df is not None and not updated_logic_df.empty:
+                    st.dataframe(updated_logic_df[updated_logic_df["重賞名"].astype(str)==str(selected_race)], use_container_width=True, hide_index=True)
+                    csv_download(updated_logic_df, "重賞別_プロンプト用ロジック辞書.csv", "① 更新後のロジック辞書CSVをダウンロード")
+                if updated_full_df is not None and not updated_full_df.empty:
+                    csv_download(updated_full_df, "重賞別_再現性フィルター抽出.csv", "② 更新後の再現性フィルター抽出CSVをダウンロード")
+                st.warning("この更新は『既存条件の追記更新』です。TARGETの全項目を使った厳密なローリング10年再抽出をする場合は、別途マスターデータ更新が必要です。")
 
     updated_history = st.session_state.get("updated_history", pd.DataFrame())
     if updated_history is not None and not updated_history.empty:
