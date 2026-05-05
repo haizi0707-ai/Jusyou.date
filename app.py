@@ -138,6 +138,14 @@ def build_prompt(race_name: str, logic_sub: pd.DataFrame, keshi_sub: pd.DataFram
     show_df = show_df.sort_values(["表示順", "条件ランク", "条件名"])
     keshi_list = keshi_columns(keshi_sub, max_keshi)
 
+    base_cols = ["重賞名", "年", "馬番", "馬名"]
+    cond_cols = show_df["条件名"].astype(str).tolist()
+    cols = base_cols + cond_cols
+    if keshi_list:
+        cols += ["消し条件該当", "消し条件名"]
+    cols += ["補足"]
+    header = ",".join(cols)
+
     lines = []
     lines.append("あなたは重賞⭐️抽出用CSV作成AIです。")
     lines.append("")
@@ -147,10 +155,22 @@ def build_prompt(race_name: str, logic_sub: pd.DataFrame, keshi_sub: pd.DataFram
     lines.append("この重賞の過去10年1〜3着馬から抽出された再現性フィルターに、今年の出走馬が該当するかを判定してください。")
     lines.append("ランキングではなく、アプリで⭐️候補を1頭抽出するための該当CSVを作成します。")
     lines.append("")
+    lines.append("【最重要：出力形式】")
+    lines.append("・最終回答は必ずCSV本文のみ")
+    lines.append("・Markdown、コードブロック、説明文、箇条書き、表形式は一切禁止")
+    lines.append("・回答の1文字目は必ずCSVヘッダーの『重賞名』から始める")
+    lines.append("・CSV以外の前置き、後書き、注釈、確認コメントは一切入れない")
+    lines.append("・全出走馬を1頭1行で出力する")
+    lines.append("・列数と列名は下のCSVヘッダーと完全一致させる")
+    lines.append("・条件に該当する場合は○、非該当は×で記入")
+    lines.append("・判断不能な条件は空欄ではなく×にする")
+    lines.append("・カンマを含む補足文は使わない。補足は短く、句読点は『、』ではなく『・』を使う")
+    lines.append("")
     lines.append("【禁止】")
     lines.append("・オッズ、人気、予想印、AI指数、他者評価は使わない")
     lines.append("・レース結果後にしか分からない情報で補正しない")
-    lines.append("・推測で雑に埋めない。分からない場合は×または空欄")
+    lines.append("・推測で雑に埋めない。分からない場合は×")
+    lines.append("・ランキングや買い目や本命印は出さない")
     lines.append("")
     lines.append("【この重賞で見る条件】")
     for rank in ["S", "A", "B", "補助"]:
@@ -165,23 +185,113 @@ def build_prompt(race_name: str, logic_sub: pd.DataFrame, keshi_sub: pd.DataFram
         for k in keshi_list:
             lines.append(f"・{k}")
     lines.append("")
-    lines.append("【出力ルール】")
-    lines.append("・最終出力はCSVのみ")
-    lines.append("・1行目はヘッダー")
-    lines.append("・条件に該当する場合は○、非該当は×で記入")
-    lines.append("・馬名は正式名")
-    lines.append("・補足には該当/非該当の根拠を短く記載")
-    lines.append("")
-    base_cols = ["重賞名", "年", "馬番", "馬名"]
-    cond_cols = show_df["条件名"].astype(str).tolist()
-    cols = base_cols + cond_cols
-    if keshi_list:
-        cols += ["消し条件該当", "消し条件名"]
-    cols += ["補足"]
     lines.append("【CSVヘッダー】")
-    lines.append(",".join(cols))
+    lines.append(header)
+    lines.append("")
+    lines.append("【出力例：形式だけ参考。馬名や内容は実データで作成】")
+    sample_values = []
+    for c in cols:
+        if c == "重賞名":
+            sample_values.append(race_name)
+        elif c == "年":
+            sample_values.append(year)
+        elif c == "馬番":
+            sample_values.append("1")
+        elif c == "馬名":
+            sample_values.append("サンプルホース")
+        elif c == "消し条件該当":
+            sample_values.append("×")
+        elif c == "消し条件名":
+            sample_values.append("")
+        elif c == "補足":
+            sample_values.append("条件該当のみ簡潔に記載")
+        else:
+            sample_values.append("○")
+    lines.append(",".join(sample_values))
+    lines.append("")
+    lines.append("【最終確認】")
+    lines.append("この依頼への回答は、上記CSVヘッダーから始まるCSV本文のみで返してください。")
     return "\n".join(lines)
 
+
+def build_result_prompt(race_name: str, year: str) -> str:
+    """レース結果をCSVだけで返してもらうためのプロンプト。"""
+    header = "重賞名,年,馬名,着順,単勝配当,複勝配当"
+    lines = []
+    lines.append("あなたは競馬結果整理AIです。")
+    lines.append("")
+    lines.append(f"【対象レース】{year}年 {race_name}")
+    lines.append("")
+    lines.append("【目的】")
+    lines.append("ネット上の公開情報で対象重賞の確定結果を確認し、アプリに貼り付ける結果CSVを作成してください。")
+    lines.append("")
+    lines.append("【最重要：出力形式】")
+    lines.append("・最終回答は必ずCSV本文のみ")
+    lines.append("・Markdown、コードブロック、説明文、箇条書き、表形式は禁止")
+    lines.append("・回答の1文字目は必ずCSVヘッダーの『重賞名』から始める")
+    lines.append("・CSV以外の前置き、後書き、注釈、確認コメントは一切入れない")
+    lines.append("・1〜3着馬だけを1頭1行で出力する")
+    lines.append("・列名と列数は下のCSVヘッダーと完全一致させる")
+    lines.append("・単勝配当と複勝配当は円表記でよい。存在しない配当は空欄")
+    lines.append("・馬名はアプリ側の判定CSVと照合するため正式馬名で書く")
+    lines.append("")
+    lines.append("【CSVヘッダー】")
+    lines.append(header)
+    lines.append("")
+    lines.append("【出力例：形式だけ参考】")
+    lines.append(f"{race_name},{year},サンプルホース,1,180円,110円")
+    lines.append(f"{race_name},{year},サンプルホース2,2,,160円")
+    lines.append(f"{race_name},{year},サンプルホース3,3,,220円")
+    lines.append("")
+    lines.append("この依頼への回答は、上記CSVヘッダーから始まるCSV本文のみで返してください。")
+    return "\n".join(lines)
+
+
+def normalize_horse_name(x) -> str:
+    return str(x).strip().replace(" ", "").replace("　", "")
+
+
+def to_numeric_pay(x):
+    if pd.isna(x):
+        return 0
+    s = str(x).replace("円", "").replace(",", "").strip()
+    if s in ("", "None", "none", "nan"):
+        return 0
+    try:
+        return int(float(s))
+    except Exception:
+        return 0
+
+
+def make_update_df(scored_df: pd.DataFrame, result_df: pd.DataFrame, race_name: str, year: str) -> pd.DataFrame:
+    """③判定結果と結果CSVを照合し、成績更新用データを作る。"""
+    if scored_df is None or scored_df.empty:
+        return pd.DataFrame()
+    if result_df is None or result_df.empty:
+        return pd.DataFrame()
+    pred = scored_df.copy()
+    res = result_df.copy()
+    if "馬名" not in pred.columns or "馬名" not in res.columns:
+        return pd.DataFrame()
+    pred["照合馬名"] = pred["馬名"].apply(normalize_horse_name)
+    res["照合馬名"] = res["馬名"].apply(normalize_horse_name)
+    keep_res = [c for c in ["照合馬名", "着順", "単勝配当", "複勝配当"] if c in res.columns]
+    merged = pred.merge(res[keep_res], on="照合馬名", how="left")
+    if "重賞名" not in merged.columns:
+        merged.insert(0, "重賞名", race_name)
+    if "年" not in merged.columns:
+        merged.insert(1, "年", year)
+    merged["着順_num"] = pd.to_numeric(merged.get("着順"), errors="coerce")
+    merged["馬券内"] = merged["着順_num"].between(1, 3)
+    merged["単勝配当_num"] = merged.get("単勝配当", pd.Series([0]*len(merged))).apply(to_numeric_pay)
+    merged["複勝配当_num"] = merged.get("複勝配当", pd.Series([0]*len(merged))).apply(to_numeric_pay)
+    merged["⭐️判定"] = merged["暫定順位"].apply(lambda x: "⭐️" if x == 1 else "") if "暫定順位" in merged.columns else ""
+    merged["⭐️的中"] = merged.apply(lambda r: bool(r.get("⭐️判定") == "⭐️" and r.get("馬券内") == True), axis=1)
+    out_cols = [c for c in [
+        "重賞名", "年", "馬番", "馬名", "暫定順位", "⭐️判定", "着順", "馬券内", "⭐️的中",
+        "単勝配当", "複勝配当", "S該当数", "A該当数", "B該当数", "補助該当数", "条件スコア", "消し該当", "消し条件名", "該当条件一覧"
+    ] if c in merged.columns]
+    return merged[out_cols]
 
 def score_prediction(pred_df: pd.DataFrame, logic_sub: pd.DataFrame, keshi_sub: pd.DataFrame, include_ranks: List[str]) -> pd.DataFrame:
     df = pred_df.copy()
@@ -345,6 +455,11 @@ with tab3:
         scored = score_prediction(pred_df, logic_sub, keshi_sub, include_ranks)
         if not scored.empty:
             status, reason, star_name = judge_star(scored, 0.0, min_gap)
+            st.session_state["last_scored"] = scored
+            st.session_state["last_status"] = status
+            st.session_state["last_star_name"] = star_name
+            st.session_state["last_race_name"] = selected_race
+            st.session_state["last_year"] = year
             if status == "⭐️":
                 st.success(f"⭐️候補：{star_name}\n\n{reason}")
             elif "準" in status:
@@ -358,7 +473,15 @@ with tab3:
 
 with tab4:
     st.subheader("結果更新")
-    st.caption("結果CSVを読み込み、③の判定結果と照合して成績更新用CSVを出力します。")
+    st.caption("結果プロンプトをコピーして確定結果CSVを作成し、③の判定結果と照合して成績を更新します。")
+
+    result_prompt = build_result_prompt(selected_race, year)
+    st.markdown("#### 結果更新用プロンプト")
+    st.text_area("この内容をコピーしてChatGPTに貼り付け", value=result_prompt, height=360)
+    st.download_button("結果更新プロンプトをtxtでダウンロード", data=result_prompt.encode("utf-8"), file_name=f"{selected_race}_{year}_結果更新プロンプト.txt", mime="text/plain")
+
+    st.markdown("---")
+    st.markdown("#### 結果CSV読み込み")
     st.markdown("必要列：`重賞名,年,馬名,着順`。任意列：`単勝配当,複勝配当`。")
     up_result = st.file_uploader("結果CSVアップロード", type=["csv"], key="result_csv")
     pasted_result = st.text_area("または結果CSVを直接貼り付け", height=160, placeholder="重賞名,年,馬名,着順,単勝配当,複勝配当")
@@ -369,14 +492,49 @@ with tab4:
     elif pasted_result.strip():
         res_df = pd.read_csv(io.StringIO(pasted_result.strip()))
 
+    scored_for_update = st.session_state.get("last_scored", pd.DataFrame())
+    if scored_for_update is None or scored_for_update.empty:
+        st.warning("先に③該当CSV判定で判定結果を作ってください。結果更新はその判定結果と照合します。")
+
+    # 任意で過去の成績履歴をアップロードして追記できるようにする
+    st.markdown("#### 成績履歴に追記する場合")
+    history_file = st.file_uploader("既存の成績履歴CSV（任意）", type=["csv"], key="history_csv")
+    history_df = read_csv_auto(history_file) if history_file is not None else pd.DataFrame()
+
     if not res_df.empty:
         st.dataframe(res_df, use_container_width=True, hide_index=True)
-        # シンプルな結果サマリー
-        if {"馬名", "着順"}.issubset(res_df.columns):
-            tmp = res_df.copy()
-            tmp["着順_num"] = pd.to_numeric(tmp["着順"], errors="coerce")
-            tmp["馬券内"] = tmp["着順_num"].between(1, 3)
-            st.metric("結果CSV内の馬券内頭数", int(tmp["馬券内"].sum()))
-            csv_download(tmp, f"{selected_race}_{year}_結果更新用.csv", "結果更新用CSVをダウンロード")
-        else:
+        if not {"馬名", "着順"}.issubset(res_df.columns):
             st.error("結果CSVには『馬名』『着順』列が必要です。")
+        elif scored_for_update is not None and not scored_for_update.empty:
+            update_df = make_update_df(scored_for_update, res_df, selected_race, year)
+            if update_df.empty:
+                st.error("③の判定結果と結果CSVを照合できませんでした。馬名表記を確認してください。")
+            else:
+                st.markdown("#### 今回の更新内容")
+                st.dataframe(update_df, use_container_width=True, hide_index=True)
+
+                star_rows = update_df[update_df.get("⭐️判定", "") == "⭐️"] if "⭐️判定" in update_df.columns else pd.DataFrame()
+                if not star_rows.empty:
+                    r = star_rows.iloc[0]
+                    if bool(r.get("馬券内", False)):
+                        st.success(f"⭐️ {r.get('馬名')} は {r.get('着順')}着。馬券内的中です。")
+                    else:
+                        st.warning(f"⭐️ {r.get('馬名')} は {r.get('着順')}着。今回は馬券外です。")
+
+                if st.button("この結果を成績履歴に反映", type="primary"):
+                    if not history_df.empty:
+                        combined = pd.concat([history_df, update_df], ignore_index=True)
+                    else:
+                        combined = update_df.copy()
+                    st.session_state["updated_history"] = combined
+                    st.success("アプリ内の一時履歴に反映しました。下のボタンからCSVをダウンロードしてください。")
+
+                csv_download(update_df, f"{selected_race}_{year}_今回結果更新.csv", "今回の結果更新CSVをダウンロード")
+
+    updated_history = st.session_state.get("updated_history", pd.DataFrame())
+    if updated_history is not None and not updated_history.empty:
+        st.markdown("#### 更新後の成績履歴")
+        st.dataframe(updated_history, use_container_width=True, hide_index=True)
+        csv_download(updated_history, "重賞星_成績履歴_更新後.csv", "更新後の成績履歴CSVをダウンロード")
+
+    st.info("Streamlit Community Cloudでは、通常のボタン操作だけでGitHub上のCSVを直接書き換えて永続保存することはできません。現在の方式は、アプリ内で反映 → 更新後CSVをダウンロード → 必要に応じてGitHubへ再アップロード、という安全な運用です。")
